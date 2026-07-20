@@ -1,0 +1,30 @@
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local environments and caches
+.env
+.env.*
+!.env.example
+node_modules/
+.cache/
+.tmp/
+temp/
+*.log
+
+# Local deployment metadata
+.wrangler/
+.dev.vars
+
+# Backups and accidental archives
+*.bak
+*.backup
+*.old
+*~

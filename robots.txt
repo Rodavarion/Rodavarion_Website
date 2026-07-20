@@ -1,0 +1,3 @@
+User-agent: *
+Disallow: /
+# rodavarion.org is a staging environment. Production rules will be enabled on rodavarion.com.
