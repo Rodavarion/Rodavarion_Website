@@ -194,7 +194,116 @@ function htmlToText(html) {
     const at = value.indexOf(marker);
     if (at > 5000) value = value.slice(0, at);
   }
-  return value.trim();
+
+  const sanitized = sanitizeLegalText(value);
+  return sanitized.text;
+}
+
+
+const SAFE_SERVICE_LINES = new Map([
+  ["Друкувати", "official-page print control"],
+  ["Допомога", "official-page help control"],
+  ["Шрифт:", "official-page font control"],
+  ["+ збільшити", "official-page zoom-in control"],
+  ["− зменшити", "official-page zoom-out control"],
+  ["- зменшити", "official-page zoom-out control"],
+  ["або Ctrl + mouse wheel", "official-page zoom hint"]
+]);
+
+function sanitizeLegalText(value, { audit = true } = {}) {
+  const lines = value.split("\n");
+  const kept = [];
+  const removed = [];
+
+  let standaloneTitleCount = 0;
+  let serviceZoneOpen = true;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const original = lines[index];
+    const line = original.trim();
+
+    if (/^КОНСТИТУЦІЯ УКРАЇНИ$/u.test(line)) {
+      standaloneTitleCount += 1;
+      if (standaloneTitleCount >= 2) {
+        serviceZoneOpen = false;
+      }
+      kept.push(original);
+      continue;
+    }
+
+    if (
+      /^\(Відомості Верховної Ради України/u.test(line) ||
+      /^\{Із змінами, внесеними/u.test(line) ||
+      /^Верховна Рада України\b/u.test(line) ||
+      /^Стаття\s+\d+/u.test(line) ||
+      /^Розділ\s+[IVXLCDM]+\b/iu.test(line)
+    ) {
+      serviceZoneOpen = false;
+    }
+
+    const reason = serviceZoneOpen ? SAFE_SERVICE_LINES.get(line) : undefined;
+    if (reason) {
+      removed.push({
+        lineNumber: index + 1,
+        text: line,
+        reason
+      });
+      continue;
+    }
+
+    kept.push(original);
+  }
+
+  const sanitized = kept
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (audit) {
+    for (const item of removed) {
+      console.log(
+        `LegalTextSanitizer removed line ${item.lineNumber}: ` +
+        `${JSON.stringify(item.text)} (${item.reason})`
+      );
+    }
+    console.log(`LegalTextSanitizer removed lines: ${removed.length}`);
+  }
+
+  return { text: sanitized, removed };
+}
+
+function runSanitizerSelfTest() {
+  const sample = [
+    "Конституція України | службовий заголовок",
+    "Друкувати",
+    "Допомога",
+    "Шрифт:",
+    "+ збільшити",
+    "− зменшити",
+    "або Ctrl + mouse wheel",
+    "КОНСТИТУЦІЯ УКРАЇНИ",
+    "Стаття 1. У тексті закону слово Допомога не повинно видалятися.",
+    "Друкувати",
+    "+",
+    "−"
+  ].join("\n");
+
+  const result = sanitizeLegalText(sample, { audit: false });
+  const expectedRemoved = 6;
+
+  if (result.removed.length !== expectedRemoved) {
+    throw new Error(
+      `Sanitizer self-test removed ${result.removed.length}, expected ${expectedRemoved}`
+    );
+  }
+  if (!result.text.includes("слово Допомога не повинно видалятися")) {
+    throw new Error("Sanitizer self-test damaged a legal sentence");
+  }
+  if (!result.text.includes("\nДрукувати\n+\n−")) {
+    throw new Error("Sanitizer self-test removed protected post-boundary lines");
+  }
+
+  console.log("PASS: LegalTextSanitizer conservative self-test");
 }
 
 function normalize(value) {
@@ -307,6 +416,10 @@ function parseConstitution(text) {
 }
 
 async function main() {
+  if (process.env.TLAW_SANITIZER_SELF_TEST === "1") {
+    runSanitizerSelfTest();
+    return;
+  }
   console.log(`Fetching official source: ${SOURCE_URL}`);
   const response = await fetch(SOURCE_URL, {
     headers: {
