@@ -51,7 +51,23 @@ import json, sys
 from pathlib import Path
 
 path, mode = sys.argv[1:]
-raw = Path(path).read_text(encoding="utf-8")
+raw_bytes = Path(path).read_bytes()
+raw = raw_bytes.decode("utf-8", errors="strict")
+
+bad_patterns = {
+    "replacement": "\ufffd",
+    "latin1-A-circumflex": "Â",
+    "latin1-A-tilde": "Ã",
+    "smart-punctuation-mojibake": "â€",
+}
+hits = {
+    name: raw.count(marker)
+    for name, marker in bad_patterns.items()
+    if marker in raw
+}
+if hits:
+    raise SystemExit(f"Encoding corruption detected in API response: {hits}")
+
 data = json.loads(raw)
 
 blob = json.dumps(data, ensure_ascii=False)

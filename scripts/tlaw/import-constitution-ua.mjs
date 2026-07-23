@@ -14,10 +14,148 @@ const OUT = process.argv[2] || "build/tlaw/constitution-import.sql";
 const sha = (value) =>
   crypto.createHash("sha256").update(value, "utf8").digest("hex");
 
+
+function encodingDamageScore(value) {
+  const replacement = (value.match(/\uFFFD/g) || []).length;
+  const nul = (value.match(/\u0000/g) || []).length;
+  const mojibake = (
+    value.match(/(?:Ã[\u0080-\u00BF]|Â[\u0080-\u00BF]?|â(?:€|„|”|€™|€“|€”|€¦)|Ð[\u0080-\u00BF]|Ñ[\u0080-\u00BF])/g) || []
+  ).length;
+  const ukrainian = (
+    value.match(/[А-Яа-яІіЇїЄєҐґ]/g) || []
+  ).length;
+  const legalMarkers = [
+    "КОНСТИТУЦІЯ УКРАЇНИ",
+    "Конституція України",
+    "Стаття 1",
+    "Верховна Рада України"
+  ].filter((marker) => value.includes(marker)).length;
+
+  return replacement * 100000 +
+    nul * 100000 +
+    mojibake * 1000 -
+    legalMarkers * 100000 -
+    Math.min(ukrainian, 20000);
+}
+
+function decodeOfficialSource(bytes, contentType = "") {
+  const declared =
+    contentType.match(/charset\s*=\s*["']?([^;"'\s]+)/i)?.[1]?.toLowerCase();
+
+  const labels = [
+    declared,
+    "utf-8",
+    "windows-1251",
+    "koi8-u"
+  ].filter(Boolean);
+
+  const candidates = [];
+  for (const label of [...new Set(labels)]) {
+    try {
+      const value = new TextDecoder(label, { fatal: false }).decode(bytes);
+      candidates.push({
+        label,
+        value,
+        score: encodingDamageScore(value)
+      });
+    } catch {
+      // Unsupported decoder labels are ignored.
+    }
+  }
+
+  if (!candidates.length) {
+    throw new Error("No supported decoder is available for the official source");
+  }
+
+  candidates.sort((a, b) => a.score - b.score);
+  const best = candidates[0];
+  let value = best.value
+    .replace(/^\uFEFF/, "")
+    .replace(/\u0000/g, "")
+    .normalize("NFC");
+
+  // Repair the common case where valid UTF-8 was interpreted as Latin-1.
+  if (/(?:Ã[\u0080-\u00BF]|Â[\u0080-\u00BF]?|Ð[\u0080-\u00BF]|Ñ[\u0080-\u00BF]){3,}/.test(value)) {
+    try {
+      const bytes = Uint8Array.from(value, (char) => char.charCodeAt(0) & 0xff);
+      const repaired = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      if (encodingDamageScore(repaired) < encodingDamageScore(value)) {
+        value = repaired.normalize("NFC");
+      }
+    } catch {
+      // Keep the best raw decoding when reinterpretation is not valid UTF-8.
+    }
+  }
+
+  const replacementCount = (value.match(/\uFFFD/g) || []).length;
+  const suspiciousCount = (
+    value.match(/(?:Ã[\u0080-\u00BF]|Â[\u0080-\u00BF]?|â(?:€|„|”|€™|€“|€”|€¦)|Ð[\u0080-\u00BF]|Ñ[\u0080-\u00BF])/g) || []
+  ).length;
+
+  if (replacementCount > 0) {
+    throw new Error(
+      `Encoding integrity check failed: ${replacementCount} replacement characters remain`
+    );
+  }
+  if (suspiciousCount > 5) {
+    throw new Error(
+      `Encoding integrity check failed: ${suspiciousCount} mojibake fragments remain`
+    );
+  }
+
+  console.log(
+    `Detected source encoding: ${best.label}; encoding score: ${best.score}`
+  );
+  return value;
+}
+
+
+function repairIsolatedReplacementCharacters(value) {
+  let repaired = 0;
+  const output = [...value].map((char, index, chars) => {
+    if (char !== "\uFFFD") return char;
+
+    const previous = chars[index - 1] ?? "";
+    const next = chars[index + 1] ?? "";
+    const touchesLetterOrNumber =
+      /[\p{L}\p{N}]/u.test(previous) || /[\p{L}\p{N}]/u.test(next);
+
+    if (touchesLetterOrNumber) {
+      throw new Error(
+        `Unsafe encoding damage: replacement character touches legal text at offset ${index}`
+      );
+    }
+
+    repaired += 1;
+    return "";
+  }).join("");
+
+  if (repaired > 0) {
+    console.log(`Repaired isolated replacement characters: ${repaired}`);
+  }
+  return output;
+}
+
+function assertCleanUnicode(value, label) {
+  const replacementCount = (value.match(/\uFFFD/g) || []).length;
+  const nulCount = (value.match(/\u0000/g) || []).length;
+  const mojibakeCount = (
+    value.match(/(?:Ã[\u0080-\u00BF]|Â[\u0080-\u00BF]?|â(?:€|„|”|€™|€“|€”|€¦)|Ð[\u0080-\u00BF]|Ñ[\u0080-\u00BF])/g) || []
+  ).length;
+
+  if (replacementCount || nulCount || mojibakeCount > 5) {
+    throw new Error(
+      `${label} failed Unicode audit: replacement=${replacementCount}, ` +
+      `nul=${nulCount}, mojibake=${mojibakeCount}`
+    );
+  }
+}
+
 function decodeEntities(value) {
   const named = {
     amp: "&", lt: "<", gt: ">", quot: '"', apos: "'",
-    nbsp: " ", ndash: "–", mdash: "—", laquo: "«", raquo: "»"
+    nbsp: " ", ndash: "–", mdash: "—", laquo: "«", raquo: "»",
+    plus: "+", minus: "−", hellip: "…", copy: "©", sect: "§"
   };
   return value
     .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
@@ -178,11 +316,17 @@ async function main() {
     redirect: "follow"
   });
   if (!response.ok) throw new Error(`Official source returned HTTP ${response.status}`);
-  const html = await response.text();
+  const sourceBytes = new Uint8Array(await response.arrayBuffer());
+  const html = decodeOfficialSource(
+    sourceBytes,
+    response.headers.get("content-type") || ""
+  );
+  assertCleanUnicode(html, "Official HTML");
   if (/data-load=["'][^"']+\.frame["']/i.test(html) && !/Стаття\s+1\s*[.\-–—]/iu.test(html)) {
     throw new Error("Official site returned the shell page instead of printable document text");
   }
-  const text = htmlToText(html);
+  const text = htmlToText(html).normalize("NFC");
+  assertCleanUnicode(text, "Normalized legal text");
   const sourceHash = sha(text);
   let units = parseConstitution(text);
 
@@ -232,6 +376,11 @@ async function main() {
   }
   if (new Set(units.map((u) => u.id)).size !== units.length) {
     throw new Error("Internal integrity failure: legal unit IDs are not unique");
+  }
+
+  for (const unit of units) {
+    assertCleanUnicode(unit.text_plain || "", `Legal unit ${unit.id}`);
+    assertCleanUnicode(unit.heading || "", `Legal unit heading ${unit.id}`);
   }
 
   const now = new Date().toISOString();
