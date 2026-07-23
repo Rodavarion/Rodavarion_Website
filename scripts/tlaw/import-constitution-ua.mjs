@@ -210,8 +210,35 @@ const SAFE_SERVICE_LINES = new Map([
   ["або Ctrl + mouse wheel", "official-page zoom hint"]
 ]);
 
+function stripFirstLinePrintSuffix(lines, { audit = true } = {}) {
+  const firstNonEmptyIndex = lines.findIndex((line) => line.trim().length > 0);
+  if (firstNonEmptyIndex < 0) return { lines, changed: false };
+
+  const original = lines[firstNonEmptyIndex];
+  const cleaned = original.replace(
+    /\s*\((?:Текст\s+)?для\s+друку\)\s*$/iu,
+    ""
+  );
+
+  if (cleaned === original) return { lines, changed: false };
+
+  const output = [...lines];
+  output[firstNonEmptyIndex] = cleaned;
+
+  if (audit) {
+    console.log(
+      `LegalTextSanitizer cleaned first-line print suffix at line ` +
+      `${firstNonEmptyIndex + 1}`
+    );
+  }
+
+  return { lines: output, changed: true };
+}
+
 function sanitizeLegalText(value, { audit = true } = {}) {
-  const lines = value.split("\n");
+  const initialLines = value.split("\n");
+  const suffixResult = stripFirstLinePrintSuffix(initialLines, { audit });
+  const lines = suffixResult.lines;
   const kept = [];
   const removed = [];
 
@@ -301,6 +328,27 @@ function runSanitizerSelfTest() {
   }
   if (!result.text.includes("\nДрукувати\n+\n−")) {
     throw new Error("Sanitizer self-test removed protected post-boundary lines");
+  }
+
+  const suffixSample = [
+    "",
+    "Конституція України | від 28.06.1996 № 254к/96-ВР (Текст для друку)",
+    "КОНСТИТУЦІЯ УКРАЇНИ"
+  ];
+  const suffixResult = stripFirstLinePrintSuffix(suffixSample, { audit: false });
+  if (
+    suffixResult.lines[1] !==
+    "Конституція України | від 28.06.1996 № 254к/96-ВР"
+  ) {
+    throw new Error("Sanitizer self-test failed to preserve title/date/number");
+  }
+
+  const protectedSuffix = stripFirstLinePrintSuffix(
+    ["Стаття 1. Слова (для друку) є частиною юридичного речення."],
+    { audit: false }
+  );
+  if (protectedSuffix.changed) {
+    throw new Error("Sanitizer self-test changed a non-metadata legal line");
   }
 
   console.log("PASS: LegalTextSanitizer conservative self-test");
