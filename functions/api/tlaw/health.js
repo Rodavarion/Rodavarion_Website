@@ -1,3 +1,5 @@
+import { TLAW_APPLICATION_VERSION, TLAW_RELEASE_CHANNEL } from "../../_shared/tlaw-meta.js";
+
 const securityHeaders = {
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
@@ -38,6 +40,8 @@ async function readHealth(context) {
     payload: {
       ok: true,
       service: "Rodavarion TLAW",
+      applicationVersion: TLAW_APPLICATION_VERSION,
+      releaseChannel: TLAW_RELEASE_CHANNEL,
       runtime: "Cloudflare Pages Functions",
       database: "Cloudflare D1",
       schemaVersion: row?.value ?? "unknown",
